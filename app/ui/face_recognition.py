@@ -29,7 +29,7 @@ class FaceRecognitionPage(CTkScrollableFrame):
         self.CONFIDENCE_THRESHOLD = 60
         self.SKIP_FRAMES = 3
         self.DETECTOR_BACKEND = "opencv"
-        self.MODEL_PATH = "app/models/Facenet512_svm_037.pkl"
+        self.MODEL_PATH = "train_models/examples_001/models/Facenet512_retinaface_001.pkl"
 
         # -------------------- DATA --------------------
         self.load_models_and_data()
@@ -270,7 +270,7 @@ class FaceRecognitionPage(CTkScrollableFrame):
     def load_models_and_data(self):
         try:
             with open(self.MODEL_PATH, "rb") as f:
-                self.model, self.norm = pickle.load(f)
+                self.centroids = pickle.load(f)
         except FileNotFoundError:
             print(f"Warning: Model not found at {self.MODEL_PATH}")
 
@@ -360,13 +360,15 @@ class FaceRecognitionPage(CTkScrollableFrame):
                     w = int(area["w"] * scale_x)
                     h = int(area["h"] * scale_y)
 
-                    emb_norm = self.norm.transform([emb])
-                    probs = self.model.predict_proba(emb_norm)[0]
-                    idx = np.argmax(probs)
-                    name = self.model.classes_[idx]
-                    conf = probs[idx] * 100
-                    if conf < self.CONFIDENCE_THRESHOLD:
-                        name = "Unknown"
+                    best_name = "Unknown"
+                    best_sim = 0.0
+                    for cname, centroid in self.centroids.items():
+                        sim = np.dot(emb, centroid) / (np.linalg.norm(emb) * np.linalg.norm(centroid))
+                        if sim > best_sim:
+                            best_sim = sim
+                            best_name = cname
+                    conf = best_sim * 100
+                    name = best_name if conf >= self.CONFIDENCE_THRESHOLD else "Unknown"
                     self.last_results.append((x, y, w, h, name, conf))
             except Exception:
                 pass

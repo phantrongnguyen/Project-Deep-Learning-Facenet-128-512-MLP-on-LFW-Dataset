@@ -11,6 +11,9 @@ data/raw_name
 # Hoặc nếu muốn bỏ qua tất cả trong models ngoại trừ file README (nếu có)
 models/
 
+__pycache__/
+*.pyc
+
 documents/ 
 
 app/data

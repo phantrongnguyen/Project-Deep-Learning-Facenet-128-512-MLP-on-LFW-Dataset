@@ -1,0 +1,207 @@
+import cv2
+import numpy as np
+import pickle
+import pandas as pd
+from datetime import datetime, time
+from deepface import DeepFace
+import os
+
+# ===== CẤU HÌNH =====
+MODEL_NAME = "Facenet512"
+CONFIDENCE_THRESHOLD = 60
+SKIP_FRAMES = 3
+DETECTOR_BACKEND = "opencv"
+
+MODEL_PATH = "train_models/examples_001/models/Facenet512_retinaface_001.pkl"
+ATTENDANCE_FILE = "train_models/examples_001/csv/attendance_001.csv"
+
+START_TIME = time(14, 43, 0)
+END_TIME   = time(14, 44, 0)
+
+# ===== Load model =====
+with open(MODEL_PATH, "rb") as f:
+    centroids = pickle.load(f)
+
+# ===== Load CSV =====
+os.makedirs(os.path.dirname(ATTENDANCE_FILE), exist_ok=True)
+if not os.path.exists(ATTENDANCE_FILE) or os.path.getsize(ATTENDANCE_FILE) == 0:
+    df = pd.DataFrame(columns=["Name", "Time", "Status", "Date"])
+else:
+    df = pd.read_csv(ATTENDANCE_FILE)
+if "Date" not in df.columns:
+    df["Date"] = ""
+
+def save_attendance():
+    df.to_csv(ATTENDANCE_FILE, index=False)
+
+# ===== Hàm lấy danh sách đã điểm danh hôm nay =====
+def get_marked_names_today():
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_df = df[df["Date"] == today_str]
+    return set(today_df["Name"].values)
+
+marked_names = get_marked_names_today()
+# Lưu ngày hiện tại để kiểm tra sang ngày mới
+current_date_holder = datetime.now().strftime("%Y-%m-%d")
+
+# ===== Khởi tạo webcam =====
+cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1200)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 700)
+
+frame_count = 0
+last_results = []
+blink_counter = 0
+
+print("Nhấn Q hoặc ESC để thoát")
+print(f"Khung giờ điểm danh: {START_TIME.strftime('%H:%M:%S')} - {END_TIME.strftime('%H:%M:%S')}")
+print("Mỗi người chỉ được điểm danh MỘT LẦN duy nhất trong ngày.")
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    frame_count += 1
+    now = datetime.now()
+    current_time = now.time()
+    time_str_now = now.strftime("%H:%M:%S")
+    today_str = now.strftime("%Y-%m-%d")
+
+    # Kiểm tra sang ngày mới -> reset danh sách đã điểm danh
+    if today_str != current_date_holder:
+        marked_names = get_marked_names_today()
+        current_date_holder = today_str
+        print(f"=== Đã chuyển sang ngày mới {today_str}. Reset danh sách điểm danh. ===")
+
+    # Trạng thái hệ thống (dựa trên khung giờ)
+    if current_time < START_TIME:
+        system_status = "TOO EARLY"
+        sys_color = (0, 255, 255)
+    elif START_TIME <= current_time <= END_TIME:
+        system_status = "IN TIME"
+        sys_color = (0, 255, 0)
+    else:
+        system_status = "OUT OF TIME"
+        sys_color = (0, 0, 255)
+
+    # Nhận diện khuôn mặt (skip frame)
+    if frame_count % SKIP_FRAMES == 0:
+        try:
+            small_frame = cv2.resize(frame, (320, 240))
+            results = DeepFace.represent(
+                img_path=small_frame,
+                model_name=MODEL_NAME,
+                enforce_detection=False,
+                detector_backend=DETECTOR_BACKEND
+            )
+            last_results = []
+            for res in results:
+                emb = res["embedding"]
+                area = res["facial_area"]
+                scale_x = frame.shape[1] / small_frame.shape[1]
+                scale_y = frame.shape[0] / small_frame.shape[0]
+                x = int(area["x"] * scale_x)
+                y = int(area["y"] * scale_y)
+                w = int(area["w"] * scale_x)
+                h = int(area["h"] * scale_y)
+
+                best_name = "Unknown"
+                best_sim = 0.0
+                for cname, centroid in centroids.items():
+                    sim = np.dot(emb, centroid) / (np.linalg.norm(emb) * np.linalg.norm(centroid))
+                    if sim > best_sim:
+                        best_sim = sim
+                        best_name = cname
+                confidence = best_sim * 100
+                name = best_name if confidence >= CONFIDENCE_THRESHOLD else "Unknown"
+                last_results.append((x, y, w, h, name, confidence))
+        except:
+            pass
+
+    show_out_of_time_warning = False  # cờ hiển thị cảnh báo ngoài giờ
+
+    # Xử lý từng khuôn mặt
+    for (x, y, w, h, name, confidence) in last_results:
+        color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
+        # Vẽ khung và tên
+        cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+        label = f"{name} ({confidence:.1f}%)"
+        cv2.putText(frame, label, (x, y - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+        if name != "Unknown":
+            # ----- KIỂM TRA ĐÃ ĐIỂM DANH HÔM NAY CHƯA -----
+            if name not in marked_names:
+                # Chưa điểm danh -> ghi nhận lần đầu
+                now = datetime.now()
+                current_time = now.time()
+                time_str = now.strftime("%H:%M:%S")
+                date_str = now.strftime("%Y-%m-%d")
+
+                if current_time < START_TIME:
+                    new_status = "Too Early"
+                elif START_TIME <= current_time <= END_TIME:
+                    new_status = "On"
+                else:
+                    new_status = "Off"
+                    show_out_of_time_warning = True  # bật cảnh báo ngoài giờ
+
+                # Thêm vào DataFrame và lưu
+                df.loc[len(df)] = [name, time_str, new_status, date_str]
+                marked_names.add(name)
+                save_attendance()
+                print(f"[{time_str}] {name} - {new_status} (lần đầu trong ngày)")
+
+                # Hiển thị trạng thái bên dưới khung mặt
+                cv2.putText(frame, new_status, (x, y + h + 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            else:
+                # Đã điểm danh rồi -> hiển thị thông báo
+                cv2.putText(frame, "Da diem danh roi!", (x, y + h + 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2)
+                # (Tuỳ chọn) Hiển thị trạng thái đã lưu
+                existing = df[(df["Name"] == name) & (df["Date"] == today_str)]
+                if not existing.empty:
+                    old_status = existing.iloc[0]["Status"]
+                    cv2.putText(frame, f"Trang thai: {old_status}", (x, y + h + 45),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+
+    # ===== Cảnh báo ngoài giờ (chỉ khi có người mới điểm danh ngoài giờ) =====
+    if system_status == "OUT OF TIME" and show_out_of_time_warning:
+        blink_counter += 1
+        if (blink_counter // 15) % 2 == 0:  # nhấp nháy
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (0, 120), (frame.shape[1], 180), (0, 0, 255), -1)
+            alpha = 0.6
+            cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+            cv2.putText(frame, "!! HET GIO - DIEM DANH NGOAI GIO (Off) !!",
+                        (50, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    else:
+        blink_counter = 0
+
+    # ===== Hiển thị thông tin hệ thống =====
+    cv2.putText(frame, f"Time: {time_str_now}", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+    cv2.putText(frame, f"Gio quy dinh: {START_TIME.strftime('%H:%M:%S')} - {END_TIME.strftime('%H:%M:%S')}",
+                (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    cv2.putText(frame, f"He thong: {system_status}", (10, 90),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, sys_color, 2)
+
+    # ===== Danh sách đã điểm danh trong ngày =====
+    y_offset = frame.shape[0] - 30
+    cv2.putText(frame, f"Hom nay ({today_str}):", (10, y_offset - 60),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+    for i, name in enumerate(list(marked_names)[-8:]):
+        cv2.putText(frame, name, (10, y_offset - 30 + i * 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+    cv2.imshow("Smart Attendance - Chi mot lan", frame)
+    if cv2.waitKey(1) & 0xFF in (ord('q'), 27):
+        break
+
+# ===== Kết thúc =====
+save_attendance()
+cap.release()
+cv2.destroyAllWindows()
+print("Da luu diem danh. Chuong trinh ket thuc.")
