@@ -4,6 +4,9 @@ import pickle
 import pandas as pd
 import os
 import json
+import glob
+import threading
+import time as time_module
 from datetime import datetime, time
 from PIL import Image, ImageTk
 from deepface import DeepFace
@@ -26,10 +29,23 @@ class FaceRecognitionPage(CTkScrollableFrame):
 
         # -------------------- BACKEND CONFIG --------------------
         self.MODEL_NAME = "Facenet512"
-        self.CONFIDENCE_THRESHOLD = 60
-        self.SKIP_FRAMES = 3
+        self.CONFIDENCE_THRESHOLD = 65
+        self.SKIP_FRAMES = 15
         self.DETECTOR_BACKEND = "opencv"
-        self.MODEL_PATH = "train_models/examples/models/Facenet512_retinaface_001.pkl"
+        self.FRAME_PADDING_RATIO = 0.35
+        self.MIN_BOX_PADDING = 35
+        self.BOX_THICKNESS = 3
+
+        self.MODEL_DIR = "train_models/examples/models"
+        self.model_files = self.discover_models()
+        self.MODEL_PATH = self.model_files[0] if self.model_files else ""
+
+        # -------------------- THREADING --------------------
+        self.pending_frame = None
+        self.pending_results = []
+        self.results_lock = threading.Lock()
+        self.recognition_lock = threading.Lock()
+        self.processing_thread = None
 
         # -------------------- DATA --------------------
         self.load_models_and_data()
@@ -45,7 +61,7 @@ class FaceRecognitionPage(CTkScrollableFrame):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=0)  # webcam
         self.grid_rowconfigure(1, weight=0)  # buttons
-        self.grid_rowconfigure(2, weight=1)  # status + attendance
+        self.grid_rowconfigure(2, weight=0)  # status + attendance
         self.grid_rowconfigure(3, weight=0)  # settings
 
         # 1. WEBCAM CARD
@@ -55,9 +71,9 @@ class FaceRecognitionPage(CTkScrollableFrame):
 
         self.webcam_label = CTkLabel(
             self.webcam_card, text="Webcam is Offline",
-            width=640, height=480, fg_color="gray20", corner_radius=10
+            fg_color="gray20", corner_radius=10
         )
-        self.webcam_label.grid(row=0, column=0, padx=10, pady=10)
+        self.webcam_label.grid(row=0, column=0, padx=10, pady=10, sticky="ew")
 
         # 2. BUTTON FRAME
         self.controls_frame = CTkFrame(self, fg_color="transparent")
@@ -154,12 +170,27 @@ class FaceRecognitionPage(CTkScrollableFrame):
         self.shift_option.grid(row=1, column=3, padx=10, pady=5, sticky="w")
         self.shift_option.set(self.current_shift_name())
 
+        # Model selection
+        CTkLabel(self.settings_frame, text="Model:", font=("Times New Roman", 14)).grid(
+            row=3, column=0, padx=10, pady=5, sticky="e"
+        )
+        model_names = [os.path.basename(m) for m in self.model_files]
+        self.model_option = CTkOptionMenu(
+            self.settings_frame,
+            values=model_names if model_names else ["No models found"],
+            command=self.on_model_selected,
+            width=250
+        )
+        current_model_name = os.path.basename(self.MODEL_PATH) if self.MODEL_PATH else ""
+        self.model_option.set(current_model_name if current_model_name in model_names else (model_names[0] if model_names else "No models found"))
+        self.model_option.grid(row=3, column=1, padx=10, pady=5, sticky="w")
+
         # CSV file path
         CTkLabel(self.settings_frame, text="CSV File:", font=("Times New Roman", 14)).grid(
-            row=2, column=2, padx=10, pady=5, sticky="e"
+            row=3, column=2, padx=10, pady=5, sticky="e"
         )
         self.csv_entry = CTkEntry(self.settings_frame, width=250)
-        self.csv_entry.grid(row=2, column=3, padx=10, pady=5, sticky="w")
+        self.csv_entry.grid(row=3, column=3, padx=10, pady=5, sticky="w")
         self.csv_entry.insert(0, self.ATTENDANCE_FILE)
 
         # Buttons
@@ -167,13 +198,13 @@ class FaceRecognitionPage(CTkScrollableFrame):
             self.settings_frame, text="Apply Settings", font=("Times New Roman", 14),
             command=self.apply_settings, width=120
         )
-        self.apply_btn.grid(row=3, column=0, columnspan=2, pady=10)
+        self.apply_btn.grid(row=4, column=0, columnspan=2, pady=10)
 
         self.save_config_btn = CTkButton(
             self.settings_frame, text="Save as Default", font=("Times New Roman", 14),
             command=self.save_current_config, width=120
         )
-        self.save_config_btn.grid(row=3, column=2, columnspan=2, pady=10)
+        self.save_config_btn.grid(row=4, column=2, columnspan=2, pady=10)
 
         # Update range label
         self.update_range_label()
@@ -240,6 +271,12 @@ class FaceRecognitionPage(CTkScrollableFrame):
             self.end_time_entry.insert(0, "22:00:00")
         # Custom: giữ nguyên giá trị hiện tại
 
+    def on_model_selected(self, choice):
+        for path in self.model_files:
+            if os.path.basename(path) == choice:
+                self.MODEL_PATH = path
+                break
+
     def apply_settings(self):
         try:
             new_start = datetime.strptime(self.start_time_entry.get(), "%H:%M:%S").time()
@@ -250,15 +287,12 @@ class FaceRecognitionPage(CTkScrollableFrame):
             self.END_TIME = new_end
             self.ATTENDANCE_FILE = new_csv
 
-            # Reload attendance data from new file
+            self.reload_model()
             self.load_models_and_data()
             self.update_range_label()
-
-            # Update shift dropdown display
             self.shift_option.set(self.current_shift_name())
 
         except ValueError:
-            # Invalid time format
             pass
 
     def update_range_label(self):
@@ -266,13 +300,39 @@ class FaceRecognitionPage(CTkScrollableFrame):
             text=f"Valid Hours: {self.START_TIME.strftime('%H:%M:%S')} - {self.END_TIME.strftime('%H:%M:%S')}"
         )
 
-    # -------------------- BACKEND METHODS (cập nhật để dùng self.ATTENDANCE_FILE) --------------------
-    def load_models_and_data(self):
+    # -------------------- MODEL MANAGEMENT --------------------
+    def discover_models(self):
+        pattern = os.path.join(self.MODEL_DIR, "Facenet512_retinaface_*.pkl")
+        files = sorted(glob.glob(pattern))
+        return files if files else []
+
+    def get_model_display_name(self, path):
+        name = os.path.basename(path)
         try:
-            with open(self.MODEL_PATH, "rb") as f:
-                self.centroids = pickle.load(f)
-        except FileNotFoundError:
-            print(f"Warning: Model not found at {self.MODEL_PATH}")
+            with open(path, "rb") as f:
+                raw = pickle.load(f)
+            if isinstance(raw, dict) and "centroids" in raw:
+                persons = raw.get("persons", list(raw["centroids"].keys()))
+                return f"{name} ({', '.join(persons)})"
+        except Exception:
+            pass
+        return name
+
+    def reload_model(self):
+        if not self.MODEL_PATH or not os.path.exists(self.MODEL_PATH):
+            print(f"Model not found: {self.MODEL_PATH}")
+            return
+        with open(self.MODEL_PATH, "rb") as f:
+            raw = pickle.load(f)
+        if isinstance(raw, dict) and "centroids" in raw:
+            self.centroids = raw["centroids"]
+            print(f"Loaded: {raw.get('version', '?')} - {raw.get('persons', list(self.centroids.keys()))}")
+        else:
+            self.centroids = raw
+
+    # -------------------- BACKEND METHODS --------------------
+    def load_models_and_data(self):
+        self.reload_model()
 
         if not os.path.exists(self.ATTENDANCE_FILE):
             self.df = pd.DataFrame(columns=["Name", "Time", "Status", "Date"])
@@ -294,13 +354,73 @@ class FaceRecognitionPage(CTkScrollableFrame):
         os.makedirs(os.path.dirname(self.ATTENDANCE_FILE), exist_ok=True)
         self.df.to_csv(self.ATTENDANCE_FILE, index=False)
 
+    def expand_face_box(self, x, y, w, h, frame_shape):
+        pad_x = max(int(w * self.FRAME_PADDING_RATIO), self.MIN_BOX_PADDING)
+        pad_y = max(int(h * self.FRAME_PADDING_RATIO), self.MIN_BOX_PADDING)
+        x1 = max(0, x - pad_x)
+        y1 = max(0, y - pad_y)
+        x2 = min(frame_shape[1] - 1, x + w + pad_x)
+        y2 = min(frame_shape[0] - 1, y + h + pad_y)
+        return x1, y1, x2 - x1, y2 - y1
+
+    def recognize_face(self, embedding):
+        best_name = "Unknown"
+        best_sim = 0.0
+        emb_norm = np.linalg.norm(embedding)
+        if emb_norm == 0:
+            return "Unknown", 0.0
+        for cname, centroid in self.centroids.items():
+            sim = np.dot(embedding, centroid) / (emb_norm * np.linalg.norm(centroid))
+            if sim > best_sim:
+                best_sim = sim
+                best_name = cname
+        confidence = best_sim * 100
+        if confidence >= self.CONFIDENCE_THRESHOLD:
+            return best_name, confidence
+        return "Unknown", confidence
+
+    def process_faces_thread(self):
+        while self.is_running:
+            if self.pending_frame is not None:
+                frame_copy = self.pending_frame
+                self.pending_frame = None
+                try:
+                    small = cv2.resize(frame_copy, (420, 340))
+                    results = DeepFace.represent(
+                        img_path=small,
+                        model_name=self.MODEL_NAME,
+                        detector_backend=self.DETECTOR_BACKEND,
+                        enforce_detection=False
+                    )
+                    local_results = []
+                    for res in results:
+                        emb = res["embedding"]
+                        area = res["facial_area"]
+                        sx = frame_copy.shape[1] / small.shape[1]
+                        sy = frame_copy.shape[0] / small.shape[0]
+                        x = int(area["x"] * sx)
+                        y = int(area["y"] * sy)
+                        w = int(area["w"] * sx)
+                        h = int(area["h"] * sy)
+                        x, y, w, h = self.expand_face_box(x, y, w, h, frame_copy.shape)
+                        name, conf = self.recognize_face(emb)
+                        local_results.append((x, y, w, h, name, conf))
+                    with self.results_lock:
+                        self.pending_results.clear()
+                        self.pending_results.extend(local_results)
+                except Exception:
+                    pass
+            time_module.sleep(0.005)
+
     def start_webcam(self):
         if not self.is_running:
             self.cap = cv2.VideoCapture(0)
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 940)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 680)
             self.is_running = True
             self.webcam_label.configure(text="")
+            self.processing_thread = threading.Thread(target=self.process_faces_thread, daemon=True)
+            self.processing_thread.start()
             self.update_webcam()
 
     def stop_webcam(self):
@@ -340,46 +460,29 @@ class FaceRecognitionPage(CTkScrollableFrame):
         else:
             system_status, sys_color = "OUT OF TIME", (0, 0, 255)
 
-        # Recognition logic (giữ nguyên)
+        # Recognition logic (threaded)
         if self.frame_count % self.SKIP_FRAMES == 0:
-            try:
-                small_frame = cv2.resize(frame, (320, 240))
-                results = DeepFace.represent(
-                    img_path=small_frame,
-                    model_name=self.MODEL_NAME,
-                    enforce_detection=False,
-                    detector_backend=self.DETECTOR_BACKEND
-                )
-                self.last_results = []
-                for res in results:
-                    emb = res["embedding"]
-                    area = res["facial_area"]
-                    scale_x, scale_y = frame.shape[1] / 320, frame.shape[0] / 240
-                    x = int(area["x"] * scale_x)
-                    y = int(area["y"] * scale_y)
-                    w = int(area["w"] * scale_x)
-                    h = int(area["h"] * scale_y)
+            self.pending_frame = frame.copy()
 
-                    best_name = "Unknown"
-                    best_sim = 0.0
-                    for cname, centroid in self.centroids.items():
-                        sim = np.dot(emb, centroid) / (np.linalg.norm(emb) * np.linalg.norm(centroid))
-                        if sim > best_sim:
-                            best_sim = sim
-                            best_name = cname
-                    conf = best_sim * 100
-                    name = best_name if conf >= self.CONFIDENCE_THRESHOLD else "Unknown"
-                    self.last_results.append((x, y, w, h, name, conf))
-            except Exception:
-                pass
+        with self.results_lock:
+            if self.pending_results:
+                self.last_results = list(self.pending_results)
 
-        # Draw on frame (giữ nguyên logic)
+        # Draw on frame
         show_out_of_time_warning = False
         for (x, y, w, h, name, conf) in self.last_results:
             color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
-            cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-            cv2.putText(frame, f"{name} ({conf:.1f}%)", (x, y - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            cv2.rectangle(frame, (x, y), (x + w, y + h), color, self.BOX_THICKNESS)
+            label = f"{name} ({conf:.1f}%)"
+
+            (label_w, label_h), baseline = cv2.getTextSize(
+                label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
+            )
+            label_y1 = max(0, y - label_h - baseline - 10)
+            label_y2 = max(label_h + baseline + 5, y)
+            cv2.rectangle(frame, (x, label_y1), (x + label_w + 12, label_y2), color, -1)
+            cv2.putText(frame, label, (x + 6, label_y2 - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
             if name != "Unknown":
                 if name not in self.marked_names:
@@ -391,9 +494,11 @@ class FaceRecognitionPage(CTkScrollableFrame):
                         status = "Off"
                         show_out_of_time_warning = True
 
-                    self.df.loc[len(self.df)] = [name, time_str_now, status, today_str]
-                    self.marked_names.add(name)
-                    self.save_attendance()
+                    with self.recognition_lock:
+                        if name not in self.marked_names:
+                            self.df.loc[len(self.df)] = [name, time_str_now, status, today_str]
+                            self.marked_names.add(name)
+                            self.save_attendance()
                     cv2.putText(frame, status, (x, y + h + 20),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                 else:
@@ -425,9 +530,12 @@ class FaceRecognitionPage(CTkScrollableFrame):
         cv2.putText(frame, f"System: {system_status}", (10, 90),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, sys_color, 2)
 
-        # Convert for display
+        # Convert for display (fit to label width, maintain 4:3 aspect)
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         img_pil = Image.fromarray(frame_rgb)
+        label_w = max(self.webcam_label.winfo_width(), 100)
+        label_h = int(label_w * 3 / 4)
+        img_pil = img_pil.resize((label_w, label_h), Image.Resampling.LANCZOS)
         img_tk = ImageTk.PhotoImage(image=img_pil)
         self.webcam_label.configure(image=img_tk)
         self.webcam_label.image = img_tk

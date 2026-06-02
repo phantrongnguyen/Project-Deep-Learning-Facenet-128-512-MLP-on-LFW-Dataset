@@ -95,7 +95,7 @@ class App(ctk.CTk):
     def setup_mainframe(self):
         self.main_frame = MainFrame(self)
         self.main_frame.grid(row=0, column=1, sticky="nsew")
-        self.show_face_register()
+        self.show_face_recognition()
     
     def show_face_recognition(self):
         self.main_frame.show_frame(FaceRecognitionPage)
