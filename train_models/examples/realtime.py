@@ -12,8 +12,8 @@ CONFIDENCE_THRESHOLD = 60
 SKIP_FRAMES = 3
 DETECTOR_BACKEND = "opencv"
 
-MODEL_PATH = "train_models/examples_001/models/Facenet512_retinaface_001.pkl"
-ATTENDANCE_FILE = "train_models/examples_001/csv/attendance_001.csv"
+MODEL_PATH = "train_models/examples/models/Facenet512_mtcnn_001.pkl"
+ATTENDANCE_FILE = "train_models/examples/csv/attendance_001.csv"
 
 START_TIME = time(14, 43, 0)
 END_TIME   = time(14, 44, 0)
@@ -25,11 +25,13 @@ with open(MODEL_PATH, "rb") as f:
 # ===== Load CSV =====
 os.makedirs(os.path.dirname(ATTENDANCE_FILE), exist_ok=True)
 if not os.path.exists(ATTENDANCE_FILE) or os.path.getsize(ATTENDANCE_FILE) == 0:
-    df = pd.DataFrame(columns=["Name", "Time", "Status", "Date"])
+    df = pd.DataFrame(columns=["Name", "Time", "Status", "Date", "Confidence"])
 else:
     df = pd.read_csv(ATTENDANCE_FILE)
 if "Date" not in df.columns:
     df["Date"] = ""
+if "Confidence" not in df.columns:
+    df["Confidence"] = ""
 
 def save_attendance():
     df.to_csv(ATTENDANCE_FILE, index=False)
@@ -148,7 +150,7 @@ while True:
                     show_out_of_time_warning = True  # bật cảnh báo ngoài giờ
 
                 # Thêm vào DataFrame và lưu
-                df.loc[len(df)] = [name, time_str, new_status, date_str]
+                df.loc[len(df)] = [name, time_str, new_status, date_str, f"{confidence:.1f}%"]
                 marked_names.add(name)
                 save_attendance()
                 print(f"[{time_str}] {name} - {new_status} (lần đầu trong ngày)")

@@ -4,8 +4,8 @@ import pickle
 from collections import defaultdict
 from deepface import DeepFace
 
-FACES_DB_DIR = "train_models/examples_001/data"
-MODEL_DIR = "train_models/examples_001/models"
+FACES_DB_DIR = "train_models/examples/data"
+MODEL_DIR = "train_models/examples/models"
 DETECTOR_BACKEND = "mtcnn"
 MODEL_NAME = "Facenet512"
 
