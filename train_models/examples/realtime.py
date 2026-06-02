@@ -13,7 +13,8 @@ SKIP_FRAMES = 3
 DETECTOR_BACKEND = "opencv"
 
 MODEL_PATH = "train_models/examples/models/Facenet512_mtcnn_001.pkl"
-ATTENDANCE_FILE = "train_models/examples/csv/attendance_001.csv"
+ATTENDANCE_DIR = "train_models/examples/csv"
+ATTENDANCE_BASE = "attendance"
 
 START_TIME = time(14, 43, 0)
 END_TIME   = time(14, 44, 0)
@@ -22,16 +23,16 @@ END_TIME   = time(14, 44, 0)
 with open(MODEL_PATH, "rb") as f:
     centroids = pickle.load(f)
 
-# ===== Load CSV =====
-os.makedirs(os.path.dirname(ATTENDANCE_FILE), exist_ok=True)
-if not os.path.exists(ATTENDANCE_FILE) or os.path.getsize(ATTENDANCE_FILE) == 0:
-    df = pd.DataFrame(columns=["Name", "Time", "Status", "Date", "Confidence"])
-else:
-    df = pd.read_csv(ATTENDANCE_FILE)
-if "Date" not in df.columns:
-    df["Date"] = ""
-if "Confidence" not in df.columns:
-    df["Confidence"] = ""
+# ===== Tạo file CSV mới cho phiên này =====
+os.makedirs(ATTENDANCE_DIR, exist_ok=True)
+session_start = datetime.now()
+session_tag = session_start.strftime("%Y%m%d_%H%M%S")
+ATTENDANCE_FILE = f"{ATTENDANCE_DIR}/{ATTENDANCE_BASE}_{session_tag}.csv"
+print(f"File ghi điểm danh: {ATTENDANCE_FILE}")
+
+COLUMNS = ["Name", "Time", "Status", "Date", "Confidence"]
+df = pd.DataFrame(columns=COLUMNS)
+df["Confidence"] = df["Confidence"].astype(object)
 
 def save_attendance():
     df.to_csv(ATTENDANCE_FILE, index=False)
@@ -43,7 +44,6 @@ def get_marked_names_today():
     return set(today_df["Name"].values)
 
 marked_names = get_marked_names_today()
-# Lưu ngày hiện tại để kiểm tra sang ngày mới
 current_date_holder = datetime.now().strftime("%Y-%m-%d")
 
 # ===== Khởi tạo webcam =====
