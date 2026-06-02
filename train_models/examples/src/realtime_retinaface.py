@@ -2,20 +2,26 @@ import cv2
 import numpy as np
 import pickle
 import pandas as pd
+import threading
+import time as time_module
 from datetime import datetime, time
 from deepface import DeepFace
 import os
 
 # ================== CẤU HÌNH ==================
 MODEL_NAME = "Facenet512"
-DETECTOR_BACKEND = "retinaface"
-SKIP_FRAMES = 3
-CONFIDENCE_THRESHOLD = 60
+CONFIDENCE_THRESHOLD = 70
+SKIP_FRAMES = 15
+DETECTOR_BACKEND = "opencv"
 
 MODEL_PATH = "train_models/examples/models/Facenet512_retinaface_004.pkl"
 
 ATTENDANCE_DIR = "train_models/examples/csv"
 ATTENDANCE_BASE = "attendance_004"
+
+FRAME_PADDING_RATIO = 0.35
+MIN_BOX_PADDING = 35
+BOX_THICKNESS = 4
 
 START_TIME = time(14, 43, 0)
 END_TIME   = time(14, 44, 0)
@@ -41,6 +47,7 @@ print(f"File ghi điểm danh: {ATTENDANCE_FILE}")
 
 COLUMNS = ["Name", "Time", "Status", "Date", "Confidence"]
 df = pd.DataFrame(columns=COLUMNS)
+recognition_lock = threading.Lock()
 
 def save_attendance():
     df.to_csv(ATTENDANCE_FILE, index=False)
@@ -50,6 +57,15 @@ def get_marked_names_today():
     today_df = df[df["Date"] == today_str]
     return set(today_df["Name"].values)
 
+def expand_face_box(x, y, w, h, frame_shape, padding_ratio=FRAME_PADDING_RATIO, min_padding=MIN_BOX_PADDING):
+    pad_x = max(int(w * padding_ratio), min_padding)
+    pad_y = max(int(h * padding_ratio), min_padding)
+    x1 = max(0, x - pad_x)
+    y1 = max(0, y - pad_y)
+    x2 = min(frame_shape[1] - 1, x + w + pad_x)
+    y2 = min(frame_shape[0] - 1, y + h + pad_y)
+    return x1, y1, x2 - x1, y2 - y1
+
 marked_names = get_marked_names_today()
 current_date_holder = datetime.now().strftime("%Y-%m-%d")
 
@@ -57,10 +73,11 @@ current_date_holder = datetime.now().strftime("%Y-%m-%d")
 def recognize_face(embedding):
     best_name = "Unknown"
     best_sim = 0.0
+    emb_norm = np.linalg.norm(embedding)
+    if emb_norm == 0:
+        return "Unknown", 0.0
     for cname, centroid in centroids.items():
-        sim = np.dot(embedding, centroid) / (
-            np.linalg.norm(embedding) * np.linalg.norm(centroid)
-        )
+        sim = np.dot(embedding, centroid) / (emb_norm * np.linalg.norm(centroid))
         if sim > best_sim:
             best_sim = sim
             best_name = cname
@@ -69,10 +86,51 @@ def recognize_face(embedding):
         return best_name, confidence
     return "Unknown", confidence
 
+# ================== THREAD XỬ LÝ NHẬN DIỆN ==================
+pending_frame = None
+pending_results = []
+results_lock = threading.Lock()
+
+def process_faces():
+    global pending_frame, pending_results
+    while True:
+        if pending_frame is not None:
+            frame_copy = pending_frame
+            pending_frame = None
+            try:
+                small = cv2.resize(frame_copy, (420, 340))
+                results = DeepFace.represent(
+                    img_path=small,
+                    model_name=MODEL_NAME,
+                    detector_backend=DETECTOR_BACKEND,
+                    enforce_detection=False
+                )
+                local_results = []
+                for res in results:
+                    emb = res["embedding"]
+                    area = res["facial_area"]
+                    sx = frame_copy.shape[1] / small.shape[1]
+                    sy = frame_copy.shape[0] / small.shape[0]
+                    x = int(area["x"] * sx)
+                    y = int(area["y"] * sy)
+                    w = int(area["w"] * sx)
+                    h = int(area["h"] * sy)
+                    x, y, w, h = expand_face_box(x, y, w, h, frame_copy.shape)
+                    name, conf = recognize_face(emb)
+                    local_results.append((x, y, w, h, name, conf))
+                with results_lock:
+                    pending_results.clear()
+                    pending_results.extend(local_results)
+            except Exception:
+                pass
+        time_module.sleep(0.005)
+
+threading.Thread(target=process_faces, daemon=True).start()
+
 # ================== KHỞI TẠO CAMERA ==================
 cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1200)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 700)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 940)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 680)
 
 frame_count = 0
 last_results = []
@@ -110,42 +168,30 @@ while True:
         system_status = "OUT OF TIME"
         sys_color = (0, 0, 255)
 
-    # ================== NHẬN DIỆN KHUÔN MẶT ==================
+    # ================== NHẬN DIỆN KHUÔN MẶT (thread) ==================
     if frame_count % SKIP_FRAMES == 0:
-        try:
-            small_frame = cv2.resize(frame, (320, 240))
-            results = DeepFace.represent(
-                img_path=small_frame,
-                model_name=MODEL_NAME,
-                detector_backend=DETECTOR_BACKEND,
-                enforce_detection=False
-            )
-            last_results = []
-            for res in results:
-                embedding = res["embedding"]
-                area = res["facial_area"]
-                scale_x = frame.shape[1] / small_frame.shape[1]
-                scale_y = frame.shape[0] / small_frame.shape[0]
-                x = int(area["x"] * scale_x)
-                y = int(area["y"] * scale_y)
-                w = int(area["w"] * scale_x)
-                h = int(area["h"] * scale_y)
+        pending_frame = frame.copy()
 
-                name, confidence = recognize_face(embedding)
-                last_results.append((x, y, w, h, name, confidence))
-
-        except Exception as e:
-            print("Recognition error:", e)
+    with results_lock:
+        if pending_results:
+            last_results = list(pending_results)
 
     show_out_of_time_warning = False
 
     # ================== XỬ LÝ KẾT QUẢ ==================
     for (x, y, w, h, name, confidence) in last_results:
         color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
-        cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+        cv2.rectangle(frame, (x, y), (x + w, y + h), color, BOX_THICKNESS)
         label = f"{name} ({confidence:.1f}%)"
-        cv2.putText(frame, label, (x, y - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+        (label_w, label_h), baseline = cv2.getTextSize(
+            label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
+        )
+        label_y1 = max(0, y - label_h - baseline - 10)
+        label_y2 = max(label_h + baseline + 5, y)
+        cv2.rectangle(frame, (x, label_y1), (x + label_w + 12, label_y2), color, -1)
+        cv2.putText(frame, label, (x + 6, label_y2 - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
         if name != "Unknown":
             if name not in marked_names:
@@ -162,10 +208,12 @@ while True:
                     new_status = "Off"
                     show_out_of_time_warning = True
 
-                df.loc[len(df)] = [name, time_str, new_status, date_str, f"{confidence:.1f}%"]
-                marked_names.add(name)
-                save_attendance()
-                print(f"[{time_str}] {name} - {new_status} - {confidence:.1f}%")
+                with recognition_lock:
+                    if name not in marked_names:
+                        df.loc[len(df)] = [name, time_str, new_status, date_str, f"{confidence:.1f}%"]
+                        marked_names.add(name)
+                        save_attendance()
+                        print(f"[{time_str}] {name} - {new_status} - {confidence:.1f}%")
 
                 cv2.putText(frame, new_status, (x, y + h + 20),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
