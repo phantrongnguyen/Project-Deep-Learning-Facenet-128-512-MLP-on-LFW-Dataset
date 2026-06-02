@@ -4,7 +4,7 @@ import pickle
 from sklearn.svm import SVC
 from sklearn.preprocessing import Normalizer
 
-from embedding_extractor import get_embedding
+from train_models.examples.src.embedding_extractor import get_embedding
 
 FACES_DB_DIR = "train_models/examples_001/data"
 MODEL_DIR = "train_models/examples_001/models"

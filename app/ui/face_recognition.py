@@ -29,7 +29,7 @@ class FaceRecognitionPage(CTkScrollableFrame):
         self.CONFIDENCE_THRESHOLD = 60
         self.SKIP_FRAMES = 3
         self.DETECTOR_BACKEND = "opencv"
-        self.MODEL_PATH = "train_models/examples_001/models/Facenet512_retinaface_001.pkl"
+        self.MODEL_PATH = "train_models/examples/models/Facenet512_retinaface_001.pkl"
 
         # -------------------- DATA --------------------
         self.load_models_and_data()
