@@ -10,7 +10,7 @@ import os
 
 # ================== CẤU HÌNH ==================
 MODEL_NAME = "Facenet512"
-CONFIDENCE_THRESHOLD = 70
+CONFIDENCE_THRESHOLD = 65
 SKIP_FRAMES = 15
 DETECTOR_BACKEND = "opencv"
 
@@ -21,7 +21,7 @@ ATTENDANCE_BASE = "attendance_004"
 
 FRAME_PADDING_RATIO = 0.35
 MIN_BOX_PADDING = 35
-BOX_THICKNESS = 4
+BOX_THICKNESS = 3
 
 START_TIME = time(14, 43, 0)
 END_TIME   = time(14, 44, 0)
@@ -146,6 +146,8 @@ while True:
     if not ret:
         print("Không đọc được camera.")
         break
+
+    frame = cv2.flip(frame, 1)
 
     frame_count += 1
     now = datetime.now()
