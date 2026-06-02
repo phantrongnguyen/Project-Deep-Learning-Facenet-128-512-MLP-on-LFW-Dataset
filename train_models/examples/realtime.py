@@ -12,7 +12,7 @@ CONFIDENCE_THRESHOLD = 60
 SKIP_FRAMES = 3
 DETECTOR_BACKEND = "opencv"
 
-MODEL_PATH = "train_models/examples/models/Facenet512_mtcnn_001.pkl"
+MODEL_PATH = "train_models/examples/models/Facenet512_svm_001.pkl"
 ATTENDANCE_DIR = "train_models/examples/csv"
 ATTENDANCE_BASE = "attendance"
 
