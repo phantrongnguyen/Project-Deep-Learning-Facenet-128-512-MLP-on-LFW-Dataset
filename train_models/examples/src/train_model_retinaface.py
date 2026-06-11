@@ -11,7 +11,7 @@ from deepface import DeepFace
 # CẤU HÌNH
 # =========================================================
 FACES_DB_DIR = "train_models/examples/data"
-MODEL_DIR = "train_models/examples/models"
+MODEL_DIR = "train_models/examples/models/model_retinaface"
 
 MODEL_NAME = "Facenet512"
 DETECTOR_BACKEND = "retinaface"

@@ -36,7 +36,7 @@ class FaceRecognitionPage(CTkScrollableFrame):
         self.MIN_BOX_PADDING = 35
         self.BOX_THICKNESS = 3
 
-        self.MODEL_DIR = "train_models/examples/models"
+        self.MODEL_DIR = "train_models/examples/models/model_retinaface"
         self.model_files = self.discover_models()
         self.MODEL_PATH = self.model_files[0] if self.model_files else ""
 
